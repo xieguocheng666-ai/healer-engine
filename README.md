@@ -1,4 +1,4 @@
-# AI 测试智能体（Agent + Playwright 自愈）
+# Healer 自愈引擎（Agent + Playwright 自愈）
 
 一个真正能跑起来的 AI UI 测试智能体：输入一句自然语言，自动生成测试步骤 → Playwright 执行 → 定位失败时分层自愈 → 自愈救不回时判定失败性质 → 最终产出量化报告（token 成本 / 自愈率 / 误修数 / 各阶段耗时）。
 
@@ -57,7 +57,7 @@
 ## 项目结构
 
 ```
-ai-test-agent/
+healer-engine/
 ├── agent/
 │   ├── generator.py      # ① 自然语言 → 步骤
 │   ├── runner.py         # ② Playwright 执行 + 失败分流
