@@ -39,12 +39,13 @@ class HealRecord:
 
 
 class Healer:
-    def __init__(self, client: LLMClient, page, audit_path: str = "heals.jsonl"):
+    def __init__(self, client: LLMClient, page, audit_path: str = "heals.jsonl", *, allow_llm: bool = True):
         self.client = client
         self.page = page
         self.audit_path = audit_path
         self.records: list[HealRecord] = []
         self._attempts: dict[str, int] = {}
+        self.allow_llm = allow_llm
 
     def heal(self, failure: FailureDetail, step_index: int, run_id: str) -> str | None:
         """尝试自愈定位失败。返回可应用的新选择器，或 None（修不好 / 触栏不应用）。"""
@@ -130,6 +131,8 @@ class Healer:
 
     # ---- L2 LLM 重定位 ----
     def _try_l2(self, failure: FailureDetail) -> str | None:
+        if not self.allow_llm:
+            return None
         prompt = (
             f"下面的 UI 测试步骤因选择器定位失败，请重新定位目标元素，输出一个可用的 CSS 选择器。\n\n"
             f"失败信息：{failure.error}\n"

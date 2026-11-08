@@ -21,6 +21,18 @@ python demo_healing.py
 
 ## 执行过程
 
+新增对照评估命令：
+
+```powershell
+python -m evaluation.benchmark
+python -m evaluation.benchmark --with-model --repeats 3 --max-model-calls 12
+python -m evaluation.shophub --source D:/my-test-framework
+```
+
+第一条比较关闭自愈与纯规则，不调用模型；第二条增加真实模型对照并限制最多 12 次模型请求；第三条在临时数据库中运行真实 ShopHub 加购核验，自动回收服务与数据库。需要 ShopHub 源码、已安装依赖的虚拟环境以及可建库的本地 MySQL 账号。
+
+21 个固定场景、三轮对照的实际数据与边界见 [评估报告](docs/evaluation-2026-11-08.md)：扣除原本成功的场景后，规则恢复 24/33，规则加模型恢复 30/33。额外收益主要来自规则尚未覆盖的定位方式，不代表模型不可替代。
+
 ```text
 自然语言 → 生成结构化步骤 → 执行
                               ├─ 正常 → 下一步
@@ -60,7 +72,7 @@ python demo_healing.py
 python main.py "打开 http://127.0.0.1:8000/login.html，输入账号 alice 密码 alice123，点击登录，断言 URL 包含 index.html"
 ```
 
-仓库不包含完整电商服务。默认模型、接口地址见 `config/settings.py`；本轮没有验证真实模型调用、当前价格或电商完整流程。生成器没有浏览器探索能力，无法仅凭自然语言可靠获知页面真实属性。
+仓库不包含完整电商服务。默认模型、接口地址见 `config/settings.py`；已单独验证真实模型自愈调用和 ShopHub 登录、加购、购物车链路，尚未实测自然语言生成的完整流水线或当前价格。生成器没有浏览器探索能力，无法仅凭自然语言可靠获知页面真实属性。
 
 ## 如何读报告
 
@@ -86,6 +98,7 @@ python main.py "打开 http://127.0.0.1:8000/login.html，输入账号 alice 密
 - `agent/runner.py`：浏览器执行、断言及失败采集。
 - `main.py`：用例编排、停止规则和最终报告。
 - `demo_healing.py`：带预期结果的离线浏览器验证。
+- `evaluation/`：固定场景对照、有限真实模型调用与真实 ShopHub 临时实例验证。
 - `docs/进度.md`：本项目唯一进度记录。
 
 设计依据：[Playwright 定位建议](https://playwright.dev/python/docs/locators)、[可操作性检查](https://playwright.dev/python/docs/actionability)。历史设计保留在 `docs/`，当前行为以代码、测试和本文为准。
