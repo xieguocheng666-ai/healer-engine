@@ -14,6 +14,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, asdict
+from html.parser import HTMLParser
 
 from config.settings import (
     CRITICAL_URL_KEYWORDS,
@@ -55,6 +56,8 @@ class Healer:
         reason = None
         if failure.step.action not in ("click", "fill", "wait"):
             reason = "unsupported_action"
+        elif failure.step.sensitive:
+            reason = "sensitive_step"
         elif self._is_critical(failure.page_url) or self._is_critical(self.page.url):
             reason = "critical_flow"
         elif self._target is None:
@@ -99,7 +102,43 @@ class Healer:
         for sel in self._extract_candidates(html):
             if self._verify(sel, failure.step):
                 return sel
+        for sel in self._semantic_candidates(failure.step):
+            if self._verify(sel, failure.step):
+                return sel
         return None
+
+    @staticmethod
+    def _css_string(value: str) -> str:
+        # CSS hex escapes terminate with a space so following digits stay literal.
+        return '"' + ''.join(
+            f"\\{ord(char):x} " if char in '\\"' or ord(char) < 32 or ord(char) == 127
+            else char for char in value
+        ) + '"'
+
+    def _semantic_candidates(self, step: Step) -> list[str]:
+        target = step.target
+        base = target.tag
+        for name, value in target.attributes.items():
+            # Escape every identifier character, including punctuation and leading digits.
+            escaped_name = ''.join(f"\\{ord(char):x} " for char in name)
+            base += f'[{escaped_name}={self._css_string(value)}]'
+        candidates = [base] if target.attributes else []
+        if target.text:
+            candidates.append(f'{base}:text-is({self._css_string(target.text)})')
+            # :text-is selects the smallest text element. XPath string(.) also
+            # handles a button whose entire label is nested inside a span.
+            whitespace = '\t\n\r\v\f\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+            normalized = f'normalize-space(translate(string(.), {self._xpath_string(whitespace)}, {self._xpath_string(" " * len(whitespace))}))'
+            candidates.append(f'{base} >> xpath=self::*[{normalized}={self._xpath_string(target.text)}]')
+        return candidates
+
+    @staticmethod
+    def _xpath_string(value: str) -> str:
+        if "'" not in value:
+            return f"'{value}'"
+        if '"' not in value:
+            return f'"{value}"'
+        return 'concat(' + ', "\'", '.join(f"'{part}'" for part in value.split("'")) + ')'
 
     def _extract_candidates(self, html: str) -> list[str]:
         """从失败元素 HTML 提取稳定属性候选，按唯一性排序。
@@ -108,25 +147,39 @@ class Healer:
         解决平台电商「同一商品多店在售、单属性不唯一」的定位问题。
         """
         candidates: list[str] = []
-        for tag in re.findall(r"<[^>]+>", html):
-            attrs = dict(re.findall(r'([a-zA-Z-]+)="([^"]*)"', tag))
+        class AttributeParser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.elements = []
+
+            def handle_starttag(self, tag, attrs):
+                self.elements.append(dict(attrs))
+
+        parser = AttributeParser()
+        parser.feed(html)
+        for attrs in parser.elements:
             if not attrs:
                 continue
             # id（跳过纯数字开头的非法 CSS id，如 id="1"）
-            if "id" in attrs and not attrs["id"][:1].isdigit():
-                candidates.append(f"#{attrs['id']}")
+            element_id = attrs.get("id")
+            if element_id and not element_id[:1].isdigit():
+                if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*", element_id):
+                    candidates.append(f"#{element_id}")
+                else:
+                    candidates.append(f'[id={self._css_string(element_id)}]')
             # 复合唯一键：store_id + product_id 组合
             combo = []
-            if "data-store-id" in attrs:
-                combo.append(f'data-store-id="{attrs["data-store-id"]}"')
-            if "data-product-id" in attrs:
-                combo.append(f'data-product-id="{attrs["data-product-id"]}"')
+            if attrs.get("data-store-id") is not None:
+                combo.append(f'data-store-id={self._css_string(attrs["data-store-id"])}')
+            if attrs.get("data-product-id") is not None:
+                combo.append(f'data-product-id={self._css_string(attrs["data-product-id"])}')
             if len(combo) >= 2:
                 candidates.append("[" + "][".join(combo) + "]")
             # 单个稳定属性
             for attr in ("data-testid", "aria-label", "data-action", "name", "placeholder"):
-                if attr in attrs:
-                    candidates.append(f'[{attr}="{attrs[attr]}"]')
+                if attrs.get(attr) is not None:
+                    # Attribute names here are fixed, valid CSS identifiers.
+                    candidates.append(f'[{attr}={self._css_string(attrs[attr])}]')
         return candidates
 
     # ---- L2 LLM 重定位 ----
@@ -160,7 +213,7 @@ class Healer:
 
     def _describe_step(self, step: Step) -> str:
         if step.action == "fill":
-            return f"在输入框填入「{step.value}」"
+            return "在目标输入框填入内容"
         if step.action == "click":
             return "点击一个按钮或链接"
         if step.action == "wait":
@@ -203,8 +256,12 @@ class Healer:
             if len(indices) != 1:
                 return False
             target = self.page.locator(step.target.tag).nth(indices[0]).element_handle()
-            if not loc.evaluate("(el, target) => el === target", target):
-                return False
+            try:
+                if not loc.evaluate("(el, target) => el === target", target):
+                    return False
+            finally:
+                if target is not None:
+                    target.dispose()
             return self._target_available(step)
         except Exception:
             return False

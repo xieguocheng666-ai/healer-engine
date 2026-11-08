@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Action = Literal["goto", "fill", "click", "assert", "wait"]
-AssertType = Literal["url_contains", "text_visible"]
+AssertType = Literal["url_contains", "text_visible", "text_equals", "count", "value_equals", "attribute_equals"]
 
 
 class Target(BaseModel):
@@ -36,12 +36,15 @@ class Target(BaseModel):
 class Step(BaseModel):
     """一条 UI 测试步骤。"""
 
+    model_config = ConfigDict(extra="forbid")
     action: Action
     url: str | None = None
     selector: str | None = None
     value: str | None = None
     assert_type: AssertType | None = None
     target: Target | None = None
+    attribute: str | None = None
+    sensitive: bool = False
 
     @model_validator(mode="after")
     def _check_required_fields(self) -> "Step":
@@ -53,6 +56,12 @@ class Step(BaseModel):
             raise ValueError("fill 步骤必须提供 value")
         if self.action == "assert" and (not self.assert_type or self.value is None):
             raise ValueError("assert 步骤必须提供 assert_type 和 value")
+        if self.action == "assert" and self.assert_type in ("text_equals", "count", "value_equals", "attribute_equals") and not self.selector:
+            raise ValueError("精确断言必须提供 selector")
+        if self.action == "assert" and self.assert_type == "attribute_equals" and not self.attribute:
+            raise ValueError("属性断言必须提供 attribute")
+        if self.action == "assert" and self.assert_type == "count" and (not self.value.isdigit()):
+            raise ValueError("元素数量必须为非负整数")
         return self
 
 

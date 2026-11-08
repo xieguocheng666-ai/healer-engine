@@ -1,104 +1,117 @@
-# Healer 自愈引擎
+# Healer Engine
 
-Python + Playwright UI 测试原型：自然语言生成步骤，执行失败后尝试修复定位器，保留原断言并输出审计与报告。
+**AI 增强的 UI 自动化与安全自愈工具。** 用页面证据辅助模型生成测试计划，以独立目标约束检查执行和修复，最后用原业务断言验证结果；每次运行留存报告、审计和浏览器回放。
 
-当前重点是可验证的保守修复。**定位到唯一可见元素，不代表找到了正确业务目标。** 本项目用独立目标约束检查候选；证据不足就拒绝。
+定位器是寻找页面元素的表达式；自愈是定位失效后尝试换一种寻找方式。按钮点得动不代表点对了，因此本项目将“目标身份正确”“操作恢复”“业务断言通过”分开记录。
 
-## 本地复现
+## 三分钟运行
 
-需要 Python 3.10+。在项目根目录运行：
+Python 3.10+，在仓库根目录：
 
 ```powershell
-python -m pip install -r requirements.txt
+python -m pip install -e ".[test]"
 python -m playwright install chromium
-python -m pytest -q
-python demo_healing.py
+healer doctor
+healer demo
 ```
 
-测试包含真实 Chromium 浏览器场景，需要安装浏览器；不需要 API key。离线演示覆盖属性变化、错误按钮排在前面、同名目标歧义、目标删除、禁用、缺少目标信息、同店不同商品。商品场景还验证操作后的商品编号和数量。
+演示自动启动临时本地商店，不需要模型密钥、数据库或其他项目。旧按钮编号失效后，按店铺、商品和文字恢复定位，并验证购物车里的商品与数量。终端返回报告路径；打开同目录的 `report.html` 查看结果。
 
-演示报告保存至 `reports/offline-validation/result-<run_id>.json`，审计保存至同目录的 `heals-<run_id>.jsonl`。每次运行独立输出，目录不入 Git。这些是人工标注的小规模本地场景，不代表线上准确率；离线模式没有评估模型收益。
+这是合成示例，真实 ShopHub 前后端验证见下方命令。安装包包含示例页面和计划，安装后可从其他目录运行。
 
-## 执行过程
+## 使用入口
 
-新增对照评估命令：
+| 命令 | 用途 |
+|---|---|
+| `healer demo` | 一次完成本地示例、修复和业务验证 |
+| `healer run --plan plan.json` | 执行已保存计划，默认纯规则，无需模型 |
+| `healer generate "任务" --url 页面地址 --plan-output plan.json` | 读取当前页面快照，调用模型生成计划，不执行计划 |
+| `healer run --plan plan.json --mode hybrid --analyze` | 允许模型候选与失败分析，共享有界请求预算 |
+| `healer benchmark --with-model --repeats 3` | 固定场景三模式对照，不假定模型一定有收益 |
+| `healer shophub --source D:/my-test-framework` | 独立临时数据库中的真实 ShopHub 验证 |
 
-```powershell
-python -m evaluation.benchmark
-python -m evaluation.benchmark --with-model --repeats 3 --max-model-calls 12
-python -m evaluation.shophub --source D:/my-test-framework
-```
+不安装命令入口时可使用 `python -m healer_cli`，例如 `python -m healer_cli demo`。完整参数见 `healer --help` 和各子命令的 `--help`。
 
-第一条比较关闭自愈与纯规则，不调用模型；第二条增加真实模型对照并限制最多 12 次模型请求；第三条在临时数据库中运行真实 ShopHub 加购核验，自动回收服务与数据库。需要 ShopHub 源码、已安装依赖的虚拟环境以及可建库的本地 MySQL 账号。
+运行返回码：业务验证通过为 0；执行失败、计划非法、模型不可用或最终业务未验证为非零，便于自动检查识别失败。
 
-21 个固定场景、三轮对照的实际数据与边界见 [评估报告](docs/evaluation-2026-11-08.md)：扣除原本成功的场景后，规则恢复 24/33，规则加模型恢复 30/33。额外收益主要来自规则尚未覆盖的定位方式，不代表模型不可替代。
+## 测试计划
 
-```text
-自然语言 → 生成结构化步骤 → 执行
-                              ├─ 正常 → 下一步
-                              ├─ 定位失败 → 核对目标约束 → 规则候选 → 模型候选 → 统一核验 → 重跑
-                              └─ 断言/导航等失败 → 分析并停止当前用例
-```
-
-首次失败无法恢复后，后续步骤标记 `blocked`（因前置失败而未执行）。整个用例最多尝试自愈 3 次，所有步骤共享额度。
-
-## 目标约束是什么
-
-`selector`（定位器）描述如何找到元素；`target`（目标约束）描述原本要操作哪个元素。例如给店铺 a 的商品 2 加购：
+计划是 JSON 步骤数组；也接受 `{"schema_version":1,"steps":[...]}`。示例：
 
 ```json
-{
-  "action": "click",
-  "selector": "#old-add-button",
-  "target": {
-    "tag": "button",
-    "text": "Add",
-    "attributes": {"data-store-id": "a", "data-product-id": "2"}
-  }
-}
+[
+  {"action":"goto","url":"/products.html"},
+  {
+    "action":"click",
+    "selector":"#old-add-button",
+    "target":{
+      "tag":"button",
+      "text":"加入购物车",
+      "attributes":{"data-store-id":"A","data-product-id":"2"}
+    }
+  },
+  {"action":"assert","selector":"#cart","assert_type":"text_equals","value":"商品 2 × 1"}
+]
 ```
 
-`tag` 是元素标签；`text` 是合并空白后的精确文字；`attributes` 是必须全部匹配的属性。必须提供标签，以及文字或属性中的至少一项。属性目前要求在目标元素本身，暂不支持祖先容器约束。
+`selector` 表示如何找；`target` 表示本来要找谁。标签、精确文字和全部属性必须同时满足。即使原定位器能匹配元素，也不能绕过目标检查。缺少目标约束的旧步骤仍可正常执行，但失败时不自动修复。约束属性目前要求位于目标元素自身，不支持跨页面推理或祖先容器身份。
 
-目标必须在当前页面唯一匹配；隐藏、禁用、遮挡等点击不可操作情况拒绝修复。规则和模型给出的候选必须对应同一个目标元素。没有 target 的旧步骤仍可执行，但失败后拒绝自动修复；登录、支付、结算页面在调用模型前拒绝自动修复。断言不能通过自愈改写。
+支持打开页面、填写、点击、等待和断言。断言包括 URL 包含、精确文字可见、元素完整文字、数量、输入值和属性相等；精确断言用 `text_equals/count/value_equals/attribute_equals`，属性断言还需 `attribute`。涉及删除、支付、下单等步骤可显式设置 `sensitive:true`，这些步骤禁止自动修复，但正确的原步骤仍按计划执行。
 
-这些条件仅核对提供的约束，不能证明约束本身正确。生成器被要求不猜测目标属性，生成结果仍需人工审核；目标属性也变化时，本轮实现选择拒绝。
+**修复永不改原断言，也不覆盖输入计划。** 执行的是计划副本，修复后计划只另存为建议。
 
-## 真实模型流水线
+## 安全闭环与模型位置
 
-复制 `config/.env.example` 为 `config/.env`，配置 `ZHIPU_API_KEY`，启动你自己的被测电商服务，再运行：
+```text
+页面快照 → 模型生成计划 → 结构与页面证据校验 → 保存计划
+                                                      ↓
+业务断言 ← 操作重跑 ← 统一候选核验 ← 规则候选 / 可选模型候选
+   ↓
+结果 JSON + HTML + 修复审计 + 原计划 / 建议计划 + 浏览器回放
+```
+
+- 规则支持稳定属性、精确文字和嵌套文字，不为了调用模型故意遗漏可确定的定位方式。
+- 歧义、目标缺失、不可操作、敏感步骤及登录/支付/结算页面拒绝自动修复。
+- 所有候选都必须匹配同一个独立目标；失败后停止当前用例，剩余步骤标记未执行。
+- 单用例最多 3 次自愈尝试。模型客户端默认单次超时 15 秒、最多 20 次 HTTP 尝试，瞬态错误最多重试 1 次；鉴权或响应结构错误不重试。
+- 生成器读取的是当前页的有界快照，不是全站自主探索。页面内容按数据处理；目标属性未出现在有效快照中则反馈错误重试，空或损坏快照不会绕过校验。生成计划仍需核对业务意图。
+- 模型分析只是辅助意见，不会把失败用例改成通过；文字和视觉结论一致也不代表经统计校准的准确率。
+
+## 模型配置
+
+开发 checkout 中复制 `config/.env.example` 为 `config/.env` 并配置；非源码安装可直接设置同名环境变量。变量包括 `ZHIPU_API_KEY`、`ZHIPU_BASE_URL`、`TEXT_MODEL`、`VISION_MODEL`、`SUT_BASE_URL`。接口采用兼容的对话补全格式，目前实际验证的是智谱接口，不声称所有供应商均兼容。
+
+模型请求次数与成功返回次数分开；缺少 token 用量、存在无法核算的失败尝试或没有可信价格时，费用为 `null`（未知），不会当免费。`Metrics(pricing_per_1k=...)` 可显式注入价格，实际账单仍以供应商为准。
+
+## 证据、隐私与结果口径
+
+每次执行保存到 `reports/<run_id>/`：
+
+| 文件 | 内容 |
+|---|---|
+| `report.json` / `report.html` | 执行结果、业务验证、拒绝原因、用量与成本状态 |
+| `plan.json` | 输入计划副本 |
+| `proposed-plan.json` | 修复后建议计划，不自动替换原文件 |
+| `heals.jsonl` | 每次修复的目标、候选、层级及拒绝原因 |
+| `trace.zip` | 浏览器过程回放，用 `python -m playwright show-trace 路径` 打开 |
+
+HTML 隐藏填写值、完整指令、自由错误正文和定位器内容；JSON 摘要对本次填写值脱敏。**原计划、建议计划、快照、审计、截图与 trace 仍属于本地私有证据，可能包含表单或会话信息，不能未经检查直接公开。** 生成命令另存 `.snapshot.json` 和 `.generation.json` 作为页面依据与真实模型用量记录。
+
+`heal_rate` 是操作恢复步骤数 / 尝试自愈步骤数；`business_validation` 只有全流程成功且最后一次导航/点击/填写后有断言才通过。断言质量由用例设计者负责。普通运行缺少人工正确目标标注，`false_heal_count` 保持未知；固定评估集才可对照已知目标统计误选。`execution` 是包含自愈及分析的总阶段耗时，不能与其子阶段相加。
+
+## 验证与工程交付
 
 ```powershell
-python main.py "打开 http://127.0.0.1:8000/login.html，输入账号 alice 密码 alice123，点击登录，断言 URL 包含 index.html"
+python -m pytest -q
+healer benchmark
+healer benchmark --with-model --repeats 3 --max-model-calls 12
+healer shophub --source D:/my-test-framework
 ```
 
-仓库不包含完整电商服务。默认模型、接口地址见 `config/settings.py`；已单独验证真实模型自愈调用和 ShopHub 登录、加购、购物车链路，尚未实测自然语言生成的完整流水线或当前价格。生成器没有浏览器探索能力，无法仅凭自然语言可靠获知页面真实属性。
+自动检查通过 GitHub Actions 安装项目和 Chromium、执行离线测试与示例，不使用真实模型或原数据库。ShopHub 命令另需该源码及已安装依赖的 `.venv`、运行中的 MySQL 和可建库权限；只新建随机专用数据库，结束后核验删除，不调用原库 reset。
 
-## 如何读报告
+最新结果与复现边界见 [v1 交付验收](docs/v1-delivery.md)；此前规则不完整时的 [历史实验](docs/evaluation-2026-11-08.md)保留，不与新版数字混用。
 
-| 字段 | 含义 |
-|---|---|
-| `heal_triggered` / `healing_attempts` | 自愈调用次数，含被拒绝的尝试 |
-| `heal_success` | 自愈后操作重跑通过的步骤数 |
-| `steps_attempted` | 曾尝试自愈的不同步骤数 |
-| `heal_rate` | 操作恢复步骤数 / 尝试自愈步骤数；不是业务正确率 |
-| `guardrail_rejections` | 安全检查拒绝次数，不是误修数 |
-| `false_heal_count` | 普通流水线无人工标注，值为 null；离线演示有已知正确目标，可单独统计 |
-| `business_validation` | 全部步骤成功且最后一次导航/点击/填写后存在断言才为 passed；失败为 failed；缺少最终断言为 unverified |
-| `healing.business_recovery` | 曾有操作恢复时采用业务验证结果，否则 not_applicable |
+## 代码入口
 
-业务验证只表示提供的断言通过。例如只断言页面 URL，无法证明购物车商品正确，仍需用例设计者提供合适的断言。文本和视觉分析结论属于辅助建议，所谓置信度是现有规则分级，并未经过准确率校准。
-
-模型 token（模型处理的文本单位）用量来自接口响应；费用按代码中的历史价格表估算，不是账单，未知模型当前会按零计算，因此不能用它判断实际成本。`execution` 耗时包含浏览器启动、执行、自愈和分析，不能与子阶段相加。
-
-## 文件入口
-
-- `schemas/step.py`：步骤、目标约束和失败信息。
-- `agent/healer.py`：候选生成、目标核验、安全拒绝和审计。
-- `agent/runner.py`：浏览器执行、断言及失败采集。
-- `main.py`：用例编排、停止规则和最终报告。
-- `demo_healing.py`：带预期结果的离线浏览器验证。
-- `evaluation/`：固定场景对照、有限真实模型调用与真实 ShopHub 临时实例验证。
-- `docs/进度.md`：本项目唯一进度记录。
-
-设计依据：[Playwright 定位建议](https://playwright.dev/python/docs/locators)、[可操作性检查](https://playwright.dev/python/docs/actionability)。历史设计保留在 `docs/`，当前行为以代码、测试和本文为准。
+`healer_cli.py` 提供命令入口；`main.py` 编排计划执行；`schemas/` 定义步骤与目标；`agent/` 实现生成、执行、自愈及分析；`llm/` 管理有界模型调用；`reporting/` 渲染摘要；`evaluation/` 做对照和真实业务验证。架构与取舍见 [设计说明](docs/architecture.md)，项目进度只记 [进度文档](docs/进度.md)。

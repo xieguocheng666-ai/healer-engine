@@ -9,6 +9,8 @@ run_step 返回 (status, detail)：
 """
 
 import re
+from pathlib import Path
+from urllib.parse import urljoin
 
 from playwright.sync_api import (
     sync_playwright,
@@ -22,24 +24,42 @@ from schemas.step import Step, FailureDetail
 
 
 class Runner:
-    def __init__(self, base_url: str = SUT_BASE_URL, headless: bool = True):
+    def __init__(self, base_url: str = SUT_BASE_URL, headless: bool = True, *, timeout_ms: int = 10000, trace_path=None):
         self.base_url = base_url
         self.headless = headless
         self._pw = None
         self._browser = None
         self.page = None
+        self.timeout_ms = timeout_ms
+        self.trace_path = Path(trace_path) if trace_path else None
+        self._context = None
 
     def __enter__(self) -> "Runner":
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=self.headless)
-        self.page = self._browser.new_page()
+        try:
+            self._browser = self._pw.chromium.launch(headless=self.headless)
+            self._context = self._browser.new_context()
+            if self.trace_path:
+                self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+                self._context.tracing.start(screenshots=True, snapshots=True, sources=True)
+            self.page = self._context.new_page()
+            self.page.set_default_timeout(self.timeout_ms)
+        except Exception:
+            self.__exit__()
+            raise
         return self
 
     def __exit__(self, *exc) -> None:
-        if self._browser:
-            self._browser.close()
-        if self._pw:
-            self._pw.stop()
+        try:
+            if self._context and self.trace_path:
+                self._context.tracing.stop(path=str(self.trace_path))
+        finally:
+            try:
+                if self._browser:
+                    self._browser.close()
+            finally:
+                if self._pw:
+                    self._pw.stop()
 
     def run_step(self, step: Step) -> tuple[str, FailureDetail | None]:
         """执行单步，区分操作定位失败、断言失败和导航/环境异常。"""
@@ -57,27 +77,53 @@ class Runner:
             return "assert_failed", self._capture(step, f"AssertionError: {e}")
 
     def _execute(self, step: Step) -> None:
+        if step.action in ('click', 'fill', 'wait') and step.target is not None:
+            from agent.healer import Healer
+            if not Healer(None, self.page, allow_llm=False)._verify(step.selector, step):
+                raise PlaywrightError('定位器不满足独立目标约束，拒绝执行')
         if step.action == "goto":
-            self.page.goto(step.url, wait_until="load", timeout=15000)
+            self.page.goto(urljoin(self.base_url, step.url), wait_until="load", timeout=self.timeout_ms)
         elif step.action == "fill":
-            self.page.locator(step.selector).fill(step.value, timeout=10000)
+            self.page.locator(step.selector).fill(step.value, timeout=self.timeout_ms)
         elif step.action == "click":
-            self.page.locator(step.selector).click(timeout=10000)
+            self.page.locator(step.selector).click(timeout=self.timeout_ms)
         elif step.action == "wait":
-            self.page.locator(step.selector).wait_for(state="visible", timeout=10000)
+            self.page.locator(step.selector).wait_for(state="visible", timeout=self.timeout_ms)
         elif step.action == "assert":
             if step.assert_type == "url_contains":
                 # 用 expect 自动等待跳转（登录跳转有 450ms 延迟），而非立即读 page.url
-                expect(self.page).to_have_url(re.compile(re.escape(step.value)), timeout=10000)
+                expect(self.page).to_have_url(re.compile(re.escape(step.value)), timeout=self.timeout_ms)
             elif step.assert_type == "text_visible":
-                expect(self.page.locator(f"text={step.value}").first).to_be_visible(timeout=10000)
+                loc = self.page.locator(step.selector).get_by_text(step.value, exact=True) if step.selector else self.page.get_by_text(step.value, exact=True)
+                expect(loc).to_be_visible(timeout=self.timeout_ms)
+            elif step.assert_type == "text_equals":
+                expect(self.page.locator(step.selector)).to_have_text(step.value, timeout=self.timeout_ms)
+            elif step.assert_type == "count":
+                expect(self.page.locator(step.selector)).to_have_count(int(step.value), timeout=self.timeout_ms)
+            elif step.assert_type == "value_equals":
+                expect(self.page.locator(step.selector)).to_have_value(step.value, timeout=self.timeout_ms)
+            elif step.assert_type == "attribute_equals":
+                expect(self.page.locator(step.selector)).to_have_attribute(step.attribute, step.value, timeout=self.timeout_ms)
 
     def _capture(self, step: Step, error: str) -> FailureDetail:
+        evidence_step = step.model_copy(deep=True)
+        html = self._try_element_html(step)
+        # 模型不需要填写内容来判断目标；保留原步骤供执行，失败证据用副本。
+        if step.action == 'fill' and step.value:
+            error = error.replace(step.value, '[已隐藏]')
+            if html:
+                html = html.replace(step.value, '[已隐藏]')
+            evidence_step.value = '[已隐藏]'
+            if evidence_step.selector:
+                evidence_step.selector = evidence_step.selector.replace(step.value, '[已隐藏]')
+        if html:
+            html = re.sub(r'''(?is)\bvalue\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)''', 'value="[已隐藏]"', html)
+            html = re.sub(r'(?is)(<textarea\b[^>]*>).*?(</textarea>)', r'\1[已隐藏]\2', html)
         return FailureDetail(
-            step=step,
+            step=evidence_step,
             error=error,
             page_url=self.page.url,
-            element_html=self._try_element_html(step),
+            element_html=html,
             screenshot=self._try_screenshot(),
         )
 

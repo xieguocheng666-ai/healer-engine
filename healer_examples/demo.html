@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>Healer · 本地验证商店</title>
+<style>body{margin:60px auto;max-width:850px;padding:24px;background:#f4f5f2;color:#202b29;font:17px/1.7 system-ui}h1{font-size:38px}main{display:flex;gap:24px}section{background:white;border:1px solid #d6dfd9;border-radius:12px;padding:24px;flex:1}button{background:#24584b;color:white;border:0;padding:12px 20px;border-radius:6px;cursor:pointer}small{color:#586b62}</style>
+<small>HEALER / 离线业务验证</small><h1>页面更新后，仍然加购正确的商品。</h1>
+<p>这是本地合成示例，不连接真实电商服务。旧脚本使用已失效的按钮编号，独立商品信息保持稳定。</p>
+<main><section><h2>店铺 A · 商品 1</h2><button data-store-id="A" data-product-id="1" onclick="document.querySelector('#cart').textContent='商品 1 × 1'">加入购物车</button></section>
+<section><h2>店铺 A · 商品 2</h2><button data-store-id="A" data-product-id="2" onclick="document.querySelector('#cart').textContent='商品 2 × 1'"><span>加入购物车</span></button></section></main>
+<section style="margin-top:24px"><h2>购物车</h2><div id="cart">购物车为空</div></section>
+</html>

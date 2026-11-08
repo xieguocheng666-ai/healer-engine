@@ -115,7 +115,7 @@ class Analyzer:
 
     def _describe_step(self, step: Step) -> str:
         if step.action == "fill":
-            return f"在输入框（{step.selector}）填入「{step.value}」"
+            return f"填写输入框（{step.selector}），输入值不参与失败分析"
         if step.action == "click":
             return f"点击元素（{step.selector}）"
         if step.action == "wait":

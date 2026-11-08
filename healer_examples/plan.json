@@ -1,0 +1,6 @@
+[
+  {"action":"goto","url":"/demo.html"},
+  {"action":"click","selector":"#legacy-add-product-2","target":{"tag":"button","text":"加入购物车","attributes":{"data-store-id":"A","data-product-id":"2"}}},
+  {"action":"assert","selector":"#cart","assert_type":"text_equals","value":"商品 2 × 1"},
+  {"action":"assert","selector":"#cart","assert_type":"count","value":"1"}
+]

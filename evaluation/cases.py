@@ -40,7 +40,7 @@ CASES = [
     Case('overlay', button('id="new"') + '<div style="position:fixed;inset:0;z-index:99;background:white">Loading</div>', ADD, None),
     Case('readonly_input', '<input id="new" name="email" readonly>', {'tag': 'input', 'attributes': {'name': 'email'}}, None, action='fill', value='test@example.test'),
     Case('renamed_input', '<input id="new" name="email">', {'tag': 'input', 'attributes': {'name': 'email'}}, 'input', action='fill', value='test@example.test'),
-    # 以下无 L1 支持的稳定属性，可观察模型补充选择器的价值与成本。
+    # 历史 v0 中需要模型的样本；v1 规则完善后仍保留，用于公平回归对照。
     Case('model_text_only', button('', 'Confirm cart'), {'tag': 'button', 'text': 'Confirm cart'}, 'button'),
     Case('model_title_only', button('title="Confirm cart"', 'Confirm cart'), {'tag': 'button', 'text': 'Confirm cart'}, 'button'),
     Case('model_class_only', button('class="cart-submit"', 'Confirm cart'), {'tag': 'button', 'text': 'Confirm cart'}, 'button'),

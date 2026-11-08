@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "healer-engine"
+version = "1.0.0"
+description = "Auditable UI automation recovery with deterministic contracts and bounded model assistance"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["playwright>=1.40", "requests>=2.31", "pydantic>=2.5", "python-dotenv>=1.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4"]
+
+[project.scripts]
+healer = "healer_cli:main"
+
+[tool.setuptools]
+py-modules = ["main", "healer_cli"]
+
+[tool.setuptools.packages.find]
+include = ["agent*", "config*", "llm*", "schemas*", "reporting*", "evaluation*", "healer_examples*"]
+
+[tool.setuptools.package-data]
+healer_examples = ["*.html", "*.json"]

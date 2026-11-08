@@ -151,7 +151,8 @@ def main():
         finally:
             browser.close()
     summary = {mode: summarize([r for r in rows if r['mode'] == mode]) for mode in modes}
-    report = {'schema_version': 1, 'dataset': 'synthetic-v1', 'unique_scenarios': len(CASES),
+    report = {'schema_version': 2, 'engine_version': '1.0.0', 'dataset': 'synthetic-v1', 'unique_scenarios': len(CASES),
+              'model_requested': args.with_model, 'model_evaluated': bool(gateway and gateway.attempts),
               'dataset_sha256': hashlib.sha256(json.dumps([asdict(c) for c in CASES], sort_keys=True).encode()).hexdigest(),
               'scenario_definitions': [asdict(c) for c in CASES],
               'repeats': args.repeats, 'model': gateway.client.text_model if gateway else None,

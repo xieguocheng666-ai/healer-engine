@@ -6,3 +6,7 @@ reports/
 heals.jsonl
 llm_calls.jsonl
 *.png
+*.egg-info/
+build/
+dist/
+generated-plan.json

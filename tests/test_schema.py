@@ -62,3 +62,18 @@ def test_failure_detail_holds_step_and_error():
 def test_invalid_target_contract_rejected(target):
     with pytest.raises(ValidationError):
         Step(action='click', selector='#old', target=target)
+
+
+@pytest.mark.parametrize('kind', ['text_equals', 'count', 'value_equals', 'attribute_equals'])
+def test_structured_assertion_requires_selector(kind):
+    with pytest.raises(ValidationError):
+        Step(action='assert', assert_type=kind, value='1', attribute='data-id')
+
+
+def test_exact_count_assertion_is_supported():
+    assert Step(action='assert', selector='.item', assert_type='count', value='2').assert_type == 'count'
+
+
+def test_unknown_step_fields_rejected():
+    with pytest.raises(ValidationError):
+        Step(action='click', selector='#a', execute_python='print(1)')

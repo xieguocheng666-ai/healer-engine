@@ -5,6 +5,7 @@
 """
 
 import base64
+import time
 from dataclasses import dataclass
 
 import requests
@@ -22,9 +23,30 @@ class LLMUsage:
     """单次 LLM 调用的 token 记账。"""
 
     model: str
-    input_tokens: int
-    output_tokens: int
+    input_tokens: int | None
+    output_tokens: int | None
     stage: str
+
+
+class LLMError(RuntimeError):
+    """可捕获的模型调用错误；消息不包含服务端正文。"""
+
+
+class LLMBudgetExceeded(LLMError):
+    pass
+
+
+class LLMResponseError(LLMError):
+    pass
+
+
+@dataclass
+class LLMAttempt:
+    model: str
+    stage: str
+    duration_seconds: float
+    status_code: int | None
+    error_type: str | None
 
 
 class LLMClient:
@@ -36,9 +58,18 @@ class LLMClient:
         base_url: str = ZHIPU_BASE_URL,
         text_model: str = TEXT_MODEL,
         vision_model: str = VISION_MODEL,
+        timeout: float = 15,
+        max_calls: int = 20,
+        max_retries: int = 1,
     ):
         if not api_key:
             raise ValueError("ZHIPU_API_KEY 未配置，请检查 config/.env")
+        if timeout <= 0 or max_calls < 0 or max_retries < 0:
+            raise ValueError("timeout must be positive; budgets must be nonnegative")
+        self.timeout = timeout
+        self.max_calls = max_calls
+        self.max_retries = max_retries
+        self.attempts: list[LLMAttempt] = []
         self.api_key = api_key
         self.base_url = base_url
         self.text_model = text_model
@@ -70,16 +101,49 @@ class LLMClient:
             "Content-Type": "application/json",
         }
         payload = {"model": model, "messages": messages}
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        usage = data.get("usage", {})
-        self.calls.append(
-            LLMUsage(
-                model=model,
-                input_tokens=usage.get("prompt_tokens", 0),
-                output_tokens=usage.get("completion_tokens", 0),
-                stage=stage,
-            )
-        )
-        return data["choices"][0]["message"]["content"]
+        for retry in range(self.max_retries + 1):
+            if len(self.attempts) >= self.max_calls:
+                raise LLMBudgetExceeded("LLM HTTP attempt budget exhausted")
+            started = time.perf_counter()
+            status = None
+            error_type = None
+            retryable = False
+            failure = None
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+                status = resp.status_code if isinstance(resp.status_code, int) else None
+                resp.raise_for_status()
+                try:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    if not isinstance(content, str):
+                        raise TypeError()
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                    raise LLMResponseError("Invalid LLM response structure or content") from None
+                usage = data.get("usage")
+                usage = usage if isinstance(usage, dict) else {}
+                def token_count(key):
+                    value = usage.get(key)
+                    return value if type(value) is int and value >= 0 else None
+                self.calls.append(LLMUsage(model, token_count("prompt_tokens"),
+                                           token_count("completion_tokens"), stage))
+                return content
+            except LLMResponseError as exc:
+                error_type, failure = "invalid_response", exc
+            except requests.Timeout:
+                error_type, retryable = "timeout", True
+            except requests.ConnectionError:
+                error_type, retryable = "connection", True
+            except requests.HTTPError as exc:
+                response = exc.response
+                if response is not None and isinstance(response.status_code, int):
+                    status = response.status_code
+                error_type = "http"
+                retryable = status == 429 or (status is not None and 500 <= status <= 599)
+            except requests.RequestException:
+                error_type = "request"
+            finally:
+                self.attempts.append(LLMAttempt(model, stage, time.perf_counter() - started,
+                                                status, error_type))
+            if not retryable or retry == self.max_retries:
+                raise failure or LLMError(f"LLM request failed: {error_type}, status={status}") from None
