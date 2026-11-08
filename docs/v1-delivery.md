@@ -15,7 +15,7 @@
 | 资源回收 | 自建服务停止、专用临时数据库删除并核验 |
 | 报告 | JSON / HTML / 原计划 / 建议计划 / 审计 / trace 均可生成；HTML 已在浏览器检查，无横向溢出 |
 | 审查 | 规格和代码复核完成，失败计费、报告隐私、快照校验等问题已通过回归验证 |
-| 远端自动检查 | 已配置 GitHub Actions，实际运行结果以仓库 Actions 为准；本地测试不能代替远端结果 |
+| 远端自动检查 | GitHub Actions / Ubuntu / Python 3.11 安装、151项测试及离线演示均通过，代码提交 9f3d9cb，[运行证据](https://github.com/xieguocheng666-ai/healer-engine/actions/runs/42486162995) |
 
 ## 同场景新版对照
 
@@ -43,6 +43,8 @@
 - 安装包：`reports/v1-package/healer_engine-1.0.0-py3-none-any.whl`。
 
 `reports/` 默认不入 Git；其中计划、快照和回放可能含会话或填写值，不能直接公开。已提交实验 JSON 仅包含本地合成页面结果和筛选后的真实运行摘要，没有密钥或登录会话。
+
+清理边界：本轮 build/ 与 reports/v1-package/site/ 的递归清理被自动审批拦截，工具只返回 blocked by policy；这两个临时构建目录已被 Git 忽略并保留，不影响源码、安装包或测试结果。
 
 ## 确认的边界
 
