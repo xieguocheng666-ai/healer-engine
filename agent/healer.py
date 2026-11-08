@@ -2,19 +2,18 @@
 
 五条护栏（防误修，面试重点）：
 1. 只修定位器，绝不修断言 —— assert 失败由 Runner 分流，不进入本模块。
-2. 验证通过才应用 —— 新选择器必须在真实 DOM 满足 count==1 且可见，否则丢弃。
+2. 验证通过才应用 —— 候选必须唯一、可操作且符合独立目标约束，否则丢弃。
 3. 关键流程不自动修 —— page_url 命中 login/payment/checkout 时，只记审计、不自动应用。
 4. 同一选择器失败超上限停止 —— 超过 MAX_HEAL_ATTEMPTS_PER_SELECTOR 次不再尝试。
 5. 重试上限由编排层控制（单用例自愈重跑最多 MAX_HEAL_ROUNDS_PER_RUN 轮）。
 
-每次自愈（成功/失败/触栏）都追加一行到 heals.jsonl，是 false-heal count 与 heal rate 的唯一数据源。
+每次自愈都记录目标、候选和拒绝原因；普通运行没有人工标注，误修数保持未知。
 """
 
 import json
 import re
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
 
 from config.settings import (
     CRITICAL_URL_KEYWORDS,
@@ -35,6 +34,8 @@ class HealRecord:
     guardrail_hit: bool
     auto_applied: bool
     timestamp: float
+    reason: str = "candidate_verified"
+    target: dict | None = None
 
 
 class Healer:
@@ -48,10 +49,24 @@ class Healer:
     def heal(self, failure: FailureDetail, step_index: int, run_id: str) -> str | None:
         """尝试自愈定位失败。返回可应用的新选择器，或 None（修不好 / 触栏不应用）。"""
         original = failure.step.selector or ""
+        self._target = failure.step.target
+        # 在花费模型调用或挑选候选之前拒绝不安全输入。
+        reason = None
+        if failure.step.action not in ("click", "fill", "wait"):
+            reason = "unsupported_action"
+        elif self._is_critical(failure.page_url) or self._is_critical(self.page.url):
+            reason = "critical_flow"
+        elif self._target is None:
+            reason = "missing_target"
+        elif not self._target_available(failure.step):
+            reason = "target_missing_ambiguous_or_unavailable"
+        if reason:
+            self._record(run_id, step_index, original, None, None, False, True, False, reason)
+            return None
 
         # 护栏 #4：同一选择器失败超上限，停止自愈
         if self._attempts.get(original, 0) >= MAX_HEAL_ATTEMPTS_PER_SELECTOR:
-            self._record(run_id, step_index, original, None, None, False, True, False)
+            self._record(run_id, step_index, original, None, None, False, True, False, "attempt_limit")
             return None
         self._attempts[original] = self._attempts.get(original, 0) + 1
 
@@ -62,17 +77,17 @@ class Healer:
             new_selector = self._try_l2(failure)
             layer = "L2" if new_selector else None
         if new_selector is None:
-            self._record(run_id, step_index, original, None, None, False, False, False)
+            self._record(run_id, step_index, original, None, None, False, False, False, "no_candidate")
             return None
 
         # 护栏 #2：验证通过才应用
-        verified = self._verify(new_selector)
+        verified = self._verify(new_selector, failure.step)
         if not verified:
-            self._record(run_id, step_index, original, new_selector, layer, False, True, False)
+            self._record(run_id, step_index, original, new_selector, layer, False, True, False, "candidate_rejected")
             return None
 
         # 护栏 #3：关键流程只记审计、不自动应用
-        critical = self._is_critical(failure.page_url)
+        critical = self._is_critical(failure.page_url) or self._is_critical(self.page.url)
         auto_applied = not critical
         self._record(run_id, step_index, original, new_selector, layer, True, critical, auto_applied)
         return new_selector if auto_applied else None
@@ -81,7 +96,7 @@ class Healer:
     def _try_l1(self, failure: FailureDetail) -> str | None:
         html = failure.element_html or ""
         for sel in self._extract_candidates(html):
-            if self._verify(sel):
+            if self._verify(sel, failure.step):
                 return sel
         return None
 
@@ -121,6 +136,7 @@ class Healer:
             f"当前页面 URL：{failure.page_url}\n"
             f"步骤意图：{self._describe_step(failure.step)}\n"
             f"原选择器：{failure.step.selector}\n\n"
+            f"不可修改的目标约束：{failure.step.target.model_dump_json()}\n"
             f"页面 HTML 片段（可能截断）：\n{failure.element_html or '（无 HTML 片段）'}\n\n"
             f"只输出一个新的 CSS 选择器字符串，不要任何解释。若无法确定，输出 NONE。"
         )
@@ -151,10 +167,42 @@ class Healer:
         return step.action
 
     # ---- 验证 / 护栏判定 ----
-    def _verify(self, selector: str) -> bool:
+    def _matching_indices(self, step: Step) -> list[int]:
+        return self.page.locator(step.target.tag).evaluate_all(
+            r"""(elements, target) => elements.flatMap((el, i) => {
+                const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                return ((!target.text || text === target.text) &&
+                    Object.entries(target.attributes).every(([k,v]) => el.getAttribute(k) === v)) ? [i] : [];
+            })""", step.target.model_dump())
+
+    def _target_available(self, step: Step) -> bool:
+        try:
+            indices = self._matching_indices(step)
+            if len(indices) != 1:
+                return False
+            loc = self.page.locator(step.target.tag).nth(indices[0])
+            if not loc.is_visible():
+                return False
+            if step.action == "click":
+                loc.click(trial=True, timeout=750)
+            elif step.action == "fill" and not loc.is_editable():
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _verify(self, selector: str, step: Step | None = None) -> bool:
         try:
             loc = self.page.locator(selector)
-            return loc.count() == 1 and loc.first.is_visible()
+            if loc.count() != 1 or not loc.is_visible() or step is None or step.target is None:
+                return False
+            indices = self._matching_indices(step)
+            if len(indices) != 1:
+                return False
+            target = self.page.locator(step.target.tag).nth(indices[0]).element_handle()
+            if not loc.evaluate("(el, target) => el === target", target):
+                return False
+            return self._target_available(step)
         except Exception:
             return False
 
@@ -162,7 +210,7 @@ class Healer:
         return any(k in (url or "").lower() for k in CRITICAL_URL_KEYWORDS)
 
     # ---- 审计日志 ----
-    def _record(self, run_id, step_index, original, new_selector, layer, verified, guardrail_hit, auto_applied):
+    def _record(self, run_id, step_index, original, new_selector, layer, verified, guardrail_hit, auto_applied, reason="candidate_verified"):
         record = HealRecord(
             run_id=run_id,
             step_index=step_index,
@@ -173,6 +221,8 @@ class Healer:
             guardrail_hit=guardrail_hit,
             auto_applied=auto_applied,
             timestamp=time.time(),
+            reason=reason,
+            target=self._target.model_dump() if getattr(self, "_target", None) else None,
         )
         self.records.append(record)
         with open(self.audit_path, "a", encoding="utf-8") as f:

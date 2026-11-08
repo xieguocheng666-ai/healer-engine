@@ -1,158 +1,91 @@
-# Healer 自愈引擎（Agent + Playwright 自愈）
+# Healer 自愈引擎
 
-一个真正能跑起来的 AI UI 测试智能体：输入一句自然语言，自动生成测试步骤 → Playwright 执行 → 定位失败时分层自愈 → 自愈救不回时判定失败性质 → 最终产出量化报告（token 成本 / 自愈率 / 误修数 / 各阶段耗时）。
+Python + Playwright UI 测试原型：自然语言生成步骤，执行失败后尝试修复定位器，保留原断言并输出审计与报告。
 
-不是「LLM 生成对了就完事」的玩具，核心深度在**自愈闭环**：生成的选择器错了 / 前端改了 → Healer 重新定位 → 测试自愈通过，并用 `heals.jsonl` 审计日志量化「自愈率」和「误修数」。
+当前重点是可验证的保守修复。**定位到唯一可见元素，不代表找到了正确业务目标。** 本项目用独立目标约束检查候选；证据不足就拒绝。
 
-## 架构
+## 本地复现
 
-```
-自然语言指令
-     │
-     ▼
-┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│ ① Generator │──▶│ ② Runner    │──▶│ ③ Healer    │──▶│ ④ Analyzer  │──▶│ ⑤ Metrics   │
-│  生成步骤    │   │  执行步骤    │   │  分层自愈    │   │  失败分析    │   │  量化报告    │
-└─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘
-     │                 │                 │                 │                 │
-  steps.json       locator_failed    heals.jsonl       分类+证据          cost/heal/
-                    assert_failed     审计日志         (产品bug/选择器     latency
-                                                       /环境数据)
-```
+需要 Python 3.10+。在项目根目录运行：
 
-| 模块 | 职责 | 关键设计 |
-|------|------|---------|
-| ① Generator | 自然语言 → `Step[]` | pydantic 校验 + 非法步骤打回重试（≤3 次）；定位器规则固化进 prompt |
-| ② Runner | Playwright 执行 | 失败分流：定位失败→Healer，断言失败→Analyzer；断言用 `expect` 自动等待跳转 |
-| ③ Healer | 分层自愈 | L1 免费预检 → L2 LLM 重定位；五条护栏防误修 |
-| ④ Analyzer | 判定失败性质 | 文本 LLM + 视觉模型双通道，结论一致才高置信 |
-| ⑤ Metrics | 量化 | token 成本 / heal rate / false-heal / 各阶段耗时，全部真实统计 |
-
-## 自愈机制（面试核心）
-
-**分层策略**：先用免费手段，救不回再花钱上 LLM。
-
-- **L1 免费预检**：从失败元素的 HTML 里提取稳定属性候选（`id` / `data-testid` / `aria-label` / `data-action` / `name` / `placeholder`），逐个验证。针对平台电商「同一商品多店在售、单属性不唯一」的定位难题，自动组合 `[data-store-id][data-product-id]` 复合选择器。
-- **L2 LLM 重定位**：把失败信息 + 步骤意图 + 页面 HTML 喂给 `glm-4-flash`，让它输出一个新 CSS 选择器。
-
-**五条护栏（防误修）**：
-
-1. **只修定位器，绝不修断言** —— assert 失败由 Runner 分流，不进入 Healer。
-2. **验证通过才应用** —— 新选择器必须在真实 DOM 满足 `count == 1` 且可见，否则丢弃。
-3. **关键流程不自动修** —— page_url 命中 `login` / `payment` / `checkout` 时，只记审计、不自动应用。
-4. **同一选择器失败超上限停止** —— 超过 3 次不再尝试。
-5. **重试上限由编排层控制** —— 单用例自愈重跑最多 3 轮。
-
-每次自愈（成功/失败/触栏）都追加一行到 `heals.jsonl`，是 **false-heal count** 与 **heal rate** 的唯一数据源。
-
-## 失败分析（双通道）
-
-- **文本 LLM**（`glm-4-flash`）：读 error + element_html + 页面上下文，判断「元素确实存在但选择器失效」vs「元素根本不存在（功能/数据缺失）」。
-- **视觉模型**（`glm-4v-flash`）：读截图，判断页面是否正常渲染、目标元素是否可见。
-
-两者结论一致 → 高置信度；不一致或缺截图 → 标记「需人工复核」。
-
-分类结果：`产品 bug` / `选择器问题` / `环境/数据问题`，附一句证据 + 一句修复建议。
-
-## 项目结构
-
-```
-healer-engine/
-├── agent/
-│   ├── generator.py      # ① 自然语言 → 步骤
-│   ├── runner.py         # ② Playwright 执行 + 失败分流
-│   ├── healer.py         # ③ 分层自愈 + 护栏 + 审计
-│   ├── analyzer.py       # ④ 失败分析（文本+视觉）
-│   └── metrics.py        # ⑤ 量化报告
-├── llm/
-│   └── client.py         # 智谱统一封装（文本/视觉 + token 记账）
-├── schemas/
-│   └── step.py           # Step / FailureDetail 数据模型
-├── config/
-│   ├── settings.py       # 集中配置
-│   ├── .env              # API key（不入库）
-│   └── .env.example
-├── main.py               # 编排入口：生成→执行→自愈→分析→报告
-├── demo_healing.py       # 自愈有效性演示
-├── demo_analyzer.py      # 失败分析演示
-├── tests/                # 32 个单元测试
-├── reports/              # 每次运行的报告 JSON
-└── heals.jsonl           # 自愈审计日志
-```
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-pip install -r requirements.txt
+```powershell
+python -m pip install -r requirements.txt
 python -m playwright install chromium
+python -m pytest -q
+python demo_healing.py
 ```
 
-### 2. 配置
+测试包含真实 Chromium 浏览器场景，需要安装浏览器；不需要 API key。离线演示覆盖属性变化、错误按钮排在前面、同名目标歧义、目标删除、禁用、缺少目标信息、同店不同商品。商品场景还验证操作后的商品编号和数量。
 
-复制 `config/.env.example` 为 `config/.env`，填入智谱 API Key：
+演示报告保存至 `reports/offline-validation/result-<run_id>.json`，审计保存至同目录的 `heals-<run_id>.jsonl`。每次运行独立输出，目录不入 Git。这些是人工标注的小规模本地场景，不代表线上准确率；离线模式没有评估模型收益。
 
-```bash
-cp config/.env.example config/.env
-# 编辑 .env，填入 ZHIPU_API_KEY
+## 执行过程
+
+```text
+自然语言 → 生成结构化步骤 → 执行
+                              ├─ 正常 → 下一步
+                              ├─ 定位失败 → 核对目标约束 → 规则候选 → 模型候选 → 统一核验 → 重跑
+                              └─ 断言/导航等失败 → 分析并停止当前用例
 ```
 
-### 3. 启动被测系统（SUT）
+首次失败无法恢复后，后续步骤标记 `blocked`（因前置失败而未执行）。整个用例最多尝试自愈 3 次，所有步骤共享额度。
 
-被测对象是电商平台前端（登录/商品列表/购物车/订单/卖家后台），`SUT_BASE_URL` 默认 `http://127.0.0.1:8000`。
+## 目标约束是什么
 
-```bash
-cd <被测系统目录> && python -m http.server 8000  # 或 FastAPI serve
-```
-
-### 4. 运行完整流水线
-
-```bash
-python main.py "打开登录页 http://127.0.0.1:8000/login.html，输入账号 alice 密码 alice123，点击登录，断言进入首页"
-```
-
-不带参数时用内置默认指令。运行结果打印到终端，并保存到 `reports/report-<run_id>.json`。
-
-### 5. 跑测试
-
-```bash
-pytest
-```
-
-## 报告示例
+`selector`（定位器）描述如何找到元素；`target`（目标约束）描述原本要操作哪个元素。例如给店铺 a 的商品 2 加购：
 
 ```json
 {
-  "token_cost": {
-    "by_model": [
-      {"model": "glm-4-flash", "calls": 5, "input_tokens": 1234, "output_tokens": 456, "cost_yuan": 0.0034}
-    ],
-    "total_yuan": 0.0034
-  },
-  "healing": {
-    "heal_triggered": 1,
-    "heal_success": 1,
-    "heal_rate": 1.0,
-    "false_heal_count": 0
-  },
-  "latency_seconds": {
-    "generation": 1.23,
-    "execution": 2.45,
-    "healing": 0.31,
-    "analysis": 1.02
-  },
-  "steps_generated": 5,
-  "step_results": [
-    {"index": 0, "action": "goto", "status": "passed"},
-    {"index": 1, "action": "fill", "status": "passed"},
-    {"index": 2, "action": "click", "status": "healed"}
-  ]
+  "action": "click",
+  "selector": "#old-add-button",
+  "target": {
+    "tag": "button",
+    "text": "Add",
+    "attributes": {"data-store-id": "a", "data-product-id": "2"}
+  }
 }
 ```
 
-## 技术栈
+`tag` 是元素标签；`text` 是合并空白后的精确文字；`attributes` 是必须全部匹配的属性。必须提供标签，以及文字或属性中的至少一项。属性目前要求在目标元素本身，暂不支持祖先容器约束。
 
-- **Python 3.10+**，Playwright（同步 API），pydantic v2
-- **LLM**：智谱 `glm-4-flash`（文本，0.002 元/千 tokens）+ `glm-4v-flash`（视觉，免费）
-- **测试**：pytest（32 个单元测试，覆盖 schema / LLM 封装 / generator / healer / analyzer / metrics）
+目标必须在当前页面唯一匹配；隐藏、禁用、遮挡等点击不可操作情况拒绝修复。规则和模型给出的候选必须对应同一个目标元素。没有 target 的旧步骤仍可执行，但失败后拒绝自动修复；登录、支付、结算页面在调用模型前拒绝自动修复。断言不能通过自愈改写。
+
+这些条件仅核对提供的约束，不能证明约束本身正确。生成器被要求不猜测目标属性，生成结果仍需人工审核；目标属性也变化时，本轮实现选择拒绝。
+
+## 真实模型流水线
+
+复制 `config/.env.example` 为 `config/.env`，配置 `ZHIPU_API_KEY`，启动你自己的被测电商服务，再运行：
+
+```powershell
+python main.py "打开 http://127.0.0.1:8000/login.html，输入账号 alice 密码 alice123，点击登录，断言 URL 包含 index.html"
+```
+
+仓库不包含完整电商服务。默认模型、接口地址见 `config/settings.py`；本轮没有验证真实模型调用、当前价格或电商完整流程。生成器没有浏览器探索能力，无法仅凭自然语言可靠获知页面真实属性。
+
+## 如何读报告
+
+| 字段 | 含义 |
+|---|---|
+| `heal_triggered` / `healing_attempts` | 自愈调用次数，含被拒绝的尝试 |
+| `heal_success` | 自愈后操作重跑通过的步骤数 |
+| `steps_attempted` | 曾尝试自愈的不同步骤数 |
+| `heal_rate` | 操作恢复步骤数 / 尝试自愈步骤数；不是业务正确率 |
+| `guardrail_rejections` | 安全检查拒绝次数，不是误修数 |
+| `false_heal_count` | 普通流水线无人工标注，值为 null；离线演示有已知正确目标，可单独统计 |
+| `business_validation` | 全部步骤成功且最后一次导航/点击/填写后存在断言才为 passed；失败为 failed；缺少最终断言为 unverified |
+| `healing.business_recovery` | 曾有操作恢复时采用业务验证结果，否则 not_applicable |
+
+业务验证只表示提供的断言通过。例如只断言页面 URL，无法证明购物车商品正确，仍需用例设计者提供合适的断言。文本和视觉分析结论属于辅助建议，所谓置信度是现有规则分级，并未经过准确率校准。
+
+模型 token（模型处理的文本单位）用量来自接口响应；费用按代码中的历史价格表估算，不是账单，未知模型当前会按零计算，因此不能用它判断实际成本。`execution` 耗时包含浏览器启动、执行、自愈和分析，不能与子阶段相加。
+
+## 文件入口
+
+- `schemas/step.py`：步骤、目标约束和失败信息。
+- `agent/healer.py`：候选生成、目标核验、安全拒绝和审计。
+- `agent/runner.py`：浏览器执行、断言及失败采集。
+- `main.py`：用例编排、停止规则和最终报告。
+- `demo_healing.py`：带预期结果的离线浏览器验证。
+- `docs/进度.md`：本项目唯一进度记录。
+
+设计依据：[Playwright 定位建议](https://playwright.dev/python/docs/locators)、[可操作性检查](https://playwright.dev/python/docs/actionability)。历史设计保留在 `docs/`，当前行为以代码、测试和本文为准。

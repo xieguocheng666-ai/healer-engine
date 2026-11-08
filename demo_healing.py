@@ -1,55 +1,86 @@
-"""自愈演示：登录后人为制造选择器失效，验证 Healer 分层自愈恢复并重跑通过。
+"""离线真实浏览器验证：python demo_healing.py，无需 API key 或电商服务。"""
+import json
+import uuid
+from pathlib import Path
 
-这是本项目核心深度点的可运行证明：不是「LLM 生成对了就完事」，
-而是「生成的选择器错了 / 前端改了 → Healer 重新定位 → 测试自愈通过」。
-"""
-
-import requests
+from playwright.sync_api import TimeoutError
 
 from agent.healer import Healer
 from agent.runner import Runner
-from config.settings import SUT_BASE_URL
-from llm.client import LLMClient
 from schemas.step import Step
 
 
-def login_and_enter_index(page) -> None:
-    resp = requests.post(f"{SUT_BASE_URL}/login", json={"username": "alice", "password": "alice123"})
-    token = resp.json()["token"]
-    page.goto(f"{SUT_BASE_URL}/login.html")
-    page.evaluate(f"localStorage.setItem('shop_token', '{token}')")
-    page.goto(f"{SUT_BASE_URL}/index.html")
-    page.wait_for_timeout(1500)
+class OfflineClient:
+    """禁用模型，不把固定响应伪装成模型效果。"""
+    def chat(self, *args, **kwargs):
+        raise RuntimeError("Model disabled for offline benchmark")
 
 
-def main() -> None:
-    client = LLMClient()
+SCENARIOS = [
+    ("changed_id", '<button id="new">Add</button>', {"tag": "button", "text": "Add"}, "#new"),
+    ("wrong_button_first", '<button id="delete">Delete</button><button id="new">Add</button>',
+     {"tag": "button", "text": "Add"}, "#new"),
+    ("ambiguous", '<button id="a">Add</button><button id="b">Add</button>',
+     {"tag": "button", "text": "Add"}, None),
+    ("removed", '<button id="delete">Delete</button>', {"tag": "button", "text": "Add"}, None),
+    ("disabled", '<button id="a" disabled>Add</button>', {"tag": "button", "text": "Add"}, None),
+    ("missing_identity", '<button id="delete">Delete</button>', None, None),
+    ("product_identity", '''<button id="wrong" data-store-id="a" data-product-id="1">Add</button>
+      <button id="correct" data-store-id="a" data-product-id="2"
+      onclick="document.querySelector('#cart').textContent='product-2:1'">Add</button>
+      <div id="cart">empty</div>''',
+     {"tag": "button", "text": "Add", "attributes": {"data-store-id": "a", "data-product-id": "2"}}, '#correct'),
+]
+
+
+def summarize(rows):
+    """目标误修与业务失败分开；仅适用于有人工预期的离线样本。"""
+    return {'mode': 'offline_rules_only', 'model_evaluated': False,
+            'cases': rows, 'passed': sum(r['correct'] for r in rows), 'total': len(rows),
+            'false_heal_count': sum(r['candidate'] is not None and not r['identity_correct'] for r in rows)}
+
+
+def main():
+    output = Path('reports/offline-validation')
+    output.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex[:8]
+    rows = []
     with Runner() as runner:
-        login_and_enter_index(runner.page)
+        for name, html, target, expected in SCENARIOS:
+            runner.page.set_content(html)
+            step = Step(action='click', selector='#old-missing', target=target)
+            try:
+                runner.page.locator(step.selector).click(timeout=100)
+            except TimeoutError as exc:
+                failure = runner._capture(step, str(exc))
+            else:
+                raise AssertionError('Scenario did not trigger a locator failure')
+            healer = Healer(OfflineClient(), runner.page, str(output / f'heals-{run_id}.jsonl'))
+            candidate = healer.heal(failure, 0, run_id)
+            correct = candidate is None if expected is None else (
+                candidate is not None and runner.page.locator(candidate).evaluate(
+                    '(el, expected) => el === document.querySelector(expected)', expected))
+            business = 'not_applicable'
+            identity_correct = correct
+            if correct and candidate:
+                step.selector = candidate
+                status, _ = runner.run_step(step)
+                correct = status == 'passed'
+                if name == 'product_identity':
+                    assertion = Step(action='assert', assert_type='text_visible', value='product-2:1')
+                    business, _ = runner.run_step(assertion)
+                    correct = correct and business == 'passed'
+            rows.append({'scenario': name, 'expected': expected, 'candidate': candidate,
+                         'correct': correct, 'identity_correct': identity_correct, 'business_assertion': business,
+                         'reason': healer.records[-1].reason})
+    result = summarize(rows)
+    path = output / f'result-{run_id}.json'
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(f'Report: {path.resolve()}')
+    if result['passed'] != result['total']:
+        raise SystemExit(1)
 
-        # 人为制造失效选择器：真实加购按钮是 [data-action="add"]，故意写成 add-to-cart
-        bad = Step(action="click", selector="[data-action='add-to-cart']")
-        status, detail = runner.run_step(bad)
-        print(f"[1] 失效选择器执行结果：{status}")
-        assert status == "locator_failed", "预期定位失败"
 
-        healer = Healer(client, runner.page)
-        new_selector = healer.heal(detail, 0, "demo-heal")
-        print(f"[2] Healer 自愈返回新选择器：{new_selector}")
-        for r in healer.records:
-            print(
-                f"    审计：layer={r.layer} verified={r.verified} "
-                f"guardrail_hit={r.guardrail_hit} auto_applied={r.auto_applied}"
-            )
-        assert new_selector is not None, "预期自愈成功"
-
-        bad.selector = new_selector
-        status2, _ = runner.run_step(bad)
-        print(f"[3] 自愈后重跑结果：{status2}")
-        assert status2 == "passed", "预期自愈后重跑通过"
-
-        print("自愈有效性验证通过：选择器失效 -> Healer 恢复 -> 重跑通过")
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

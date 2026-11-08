@@ -29,6 +29,7 @@ def run_pipeline(instruction: str, base_url: str = SUT_BASE_URL, output_dir: str
     run_id = uuid.uuid4().hex[:8]
     client = LLMClient()
     metrics = Metrics()
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     # ① 生成
     metrics.start_timer("generation")
@@ -38,13 +39,18 @@ def run_pipeline(instruction: str, base_url: str = SUT_BASE_URL, output_dir: str
     heal_triggered = heal_success = 0
     step_results: list[dict] = []
     analyses: list[dict] = []
+    run_heal_rounds = 0
+    failed = False
 
     # ②③④ 执行 + 自愈 + 分析
     metrics.start_timer("execution")
     with Runner(base_url=base_url) as runner:
-        healer = Healer(client, runner.page)
+        healer = Healer(client, runner.page, audit_path=str(Path(output_dir) / f"heals-{run_id}.jsonl"))
         analyzer = Analyzer(client)
         for i, step in enumerate(steps):
+            if failed:
+                step_results.append({"index": i, "action": step.action, "status": "blocked"})
+                continue
             heal_round = 0
             while True:
                 status, detail = runner.run_step(step)
@@ -62,22 +68,25 @@ def run_pipeline(instruction: str, base_url: str = SUT_BASE_URL, output_dir: str
                         heal_success += 1
                     break
 
-                if status == "assert_failed":
+                if status in ("assert_failed", "execution_failed"):
                     metrics.start_timer("analysis")
                     analyses.append({"index": i, "analysis": analyzer.analyze(detail)})
                     metrics.stop_timer("analysis")
-                    step_results.append({"index": i, "action": step.action, "status": "assert_failed"})
+                    step_results.append({"index": i, "action": step.action, "status": status})
+                    failed = True
                     break
 
                 # status == "locator_failed"
-                if heal_round >= MAX_HEAL_ROUNDS_PER_RUN:
+                if run_heal_rounds >= MAX_HEAL_ROUNDS_PER_RUN:
                     metrics.start_timer("analysis")
                     analyses.append({"index": i, "analysis": analyzer.analyze(detail)})
                     metrics.stop_timer("analysis")
                     step_results.append({"index": i, "action": step.action, "status": "locator_exhausted"})
+                    failed = True
                     break
 
                 heal_triggered += 1
+                run_heal_rounds += 1
                 metrics.start_timer("healing")
                 new_selector = healer.heal(detail, i, run_id)
                 metrics.stop_timer("healing")
@@ -87,6 +96,7 @@ def run_pipeline(instruction: str, base_url: str = SUT_BASE_URL, output_dir: str
                     analyses.append({"index": i, "analysis": analyzer.analyze(detail)})
                     metrics.stop_timer("analysis")
                     step_results.append({"index": i, "action": step.action, "status": "locator_failed"})
+                    failed = True
                     break
 
                 step.selector = new_selector
@@ -95,8 +105,14 @@ def run_pipeline(instruction: str, base_url: str = SUT_BASE_URL, output_dir: str
 
     # ⑤ 报告
     report = metrics.report(client.calls, healer.records, heal_triggered, heal_success)
+    last_operation = max((i for i, s in enumerate(steps) if s.action in ("goto", "click", "fill")), default=-1)
+    has_final_assert = any(i > last_operation and s.action == "assert" for i, s in enumerate(steps))
+    business = "failed" if failed else ("passed" if has_final_assert else "unverified")
+    report["business_validation"] = business
+    report["healing"]["business_recovery"] = business if heal_success else "not_applicable"
     report.update(
         {
+            "schema_version": 2,
             "run_id": run_id,
             "instruction": instruction,
             "steps_generated": len(steps),
@@ -105,7 +121,6 @@ def run_pipeline(instruction: str, base_url: str = SUT_BASE_URL, output_dir: str
         }
     )
 
-    Path(output_dir).mkdir(exist_ok=True)
     out_path = Path(output_dir) / f"report-{run_id}.json"
     out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report, out_path

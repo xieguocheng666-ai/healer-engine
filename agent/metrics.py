@@ -2,7 +2,7 @@
 
 所有指标都从真实运行中统计，禁止硬编码演示值：
 - token 成本：从 LLMClient.calls 的 usage 字段真实汇总，按模型分列，乘以官方定价。
-- heal rate / false-heal count：heal rate 由编排层统计「重跑通过」计数；false-heal 从 heals.jsonl 审计日志聚合。
+- heal rate：操作恢复步骤数 / 曾尝试修复步骤数；误修无标注时为未知。
 - 执行耗时：各阶段 start_timer / stop_timer 真实计时。
 """
 
@@ -60,13 +60,18 @@ class Metrics:
 
     # ---- 自愈指标 ----
     def compute_heal(self, heal_records: list, heal_triggered: int, heal_success: int) -> dict:
-        false_heal = sum(1 for r in heal_records if r.guardrail_hit)
-        heal_rate = round(heal_success / heal_triggered, 4) if heal_triggered else None
+        rejected = sum(1 for r in heal_records if r.guardrail_hit)
+        steps_attempted = len({getattr(r, "step_index", i) for i, r in enumerate(heal_records)})
+        heal_rate = round(heal_success / steps_attempted, 4) if steps_attempted else None
         return {
             "heal_triggered": heal_triggered,
             "heal_success": heal_success,
             "heal_rate": heal_rate,
-            "false_heal_count": false_heal,
+            "healing_attempts": heal_triggered,
+            "steps_attempted": steps_attempted,
+            "guardrail_rejections": rejected,
+            "false_heal_count": None,
+            "false_heal_evaluation": "not_evaluated",
         }
 
     def report(self, calls: list, heal_records: list, heal_triggered: int, heal_success: int) -> dict:

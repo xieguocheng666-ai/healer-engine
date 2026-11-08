@@ -8,10 +8,29 @@ FailureDetail 是 Runner 捕获的失败详情，作为 Healer / Analyzer 的输
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Action = Literal["goto", "fill", "click", "assert", "wait"]
 AssertType = Literal["url_contains", "text_visible"]
+
+
+class Target(BaseModel):
+    """独立于失效选择器的目标约束；全部条件必须同时成立。"""
+
+    model_config = ConfigDict(extra="forbid")
+    tag: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
+    text: str | None = None
+    attributes: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def check_identity(self):
+        if self.text is not None:
+            self.text = " ".join(self.text.split())
+        if not self.text and not self.attributes:
+            raise ValueError("目标必须有精确文字或属性，只有标签不足以识别目标")
+        if any(not key.strip() or not value.strip() for key, value in self.attributes.items()):
+            raise ValueError("目标属性名和值不能为空")
+        return self
 
 
 class Step(BaseModel):
@@ -22,6 +41,7 @@ class Step(BaseModel):
     selector: str | None = None
     value: str | None = None
     assert_type: AssertType | None = None
+    target: Target | None = None
 
     @model_validator(mode="after")
     def _check_required_fields(self) -> "Step":

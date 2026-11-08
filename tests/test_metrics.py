@@ -32,11 +32,21 @@ def test_compute_heal_rate_and_false_heal():
     m = Metrics()
     heal = m.compute_heal(records, heal_triggered=3, heal_success=2)
     assert heal["heal_rate"] == round(2 / 3, 4)
-    assert heal["false_heal_count"] == 1
+    assert heal["false_heal_count"] is None
+    assert heal["guardrail_rejections"] == 1
 
 
 def test_compute_heal_zero_triggered():
     m = Metrics()
     heal = m.compute_heal([], heal_triggered=0, heal_success=0)
     assert heal["heal_rate"] is None
-    assert heal["false_heal_count"] == 0
+    assert heal["false_heal_count"] is None
+
+
+def test_heal_rate_uses_steps_not_attempts():
+    from types import SimpleNamespace
+    records = [SimpleNamespace(step_index=0, guardrail_hit=False) for _ in range(3)]
+    heal = Metrics().compute_heal(records, heal_triggered=3, heal_success=1)
+    assert heal["heal_rate"] == 1.0
+    assert heal["healing_attempts"] == 3
+    assert heal["steps_attempted"] == 1

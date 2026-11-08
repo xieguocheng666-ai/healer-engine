@@ -51,3 +51,14 @@ def test_failure_detail_holds_step_and_error():
     assert fd.step is step
     assert fd.error == "TimeoutError"
     assert fd.element_html is None
+
+
+@pytest.mark.parametrize('target', [
+    {'tag': 'button'}, {'tag': 'button', 'text': '  '},
+    {'tag': 'button, a', 'text': 'Add'},
+    {'tag': 'button', 'attributes': {'data-product-id': ''}},
+    {'tag': 'button', 'text': 'Add', 'unknown': 'ignored'},
+])
+def test_invalid_target_contract_rejected(target):
+    with pytest.raises(ValidationError):
+        Step(action='click', selector='#old', target=target)

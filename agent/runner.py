@@ -5,7 +5,7 @@
 - 断言失败（AssertionError）→ 不进自愈，直接交给 Analyzer。
 
 run_step 返回 (status, detail)：
-  ("passed", None) / ("locator_failed", FailureDetail) / ("assert_failed", FailureDetail)
+  passed / locator_failed / assert_failed / execution_failed（导航或环境异常）。
 """
 
 import re
@@ -42,12 +42,17 @@ class Runner:
             self._pw.stop()
 
     def run_step(self, step: Step) -> tuple[str, FailureDetail | None]:
-        """执行单步。返回 (status, detail)，status ∈ passed/locator_failed/assert_failed。"""
+        """执行单步，区分操作定位失败、断言失败和导航/环境异常。"""
         try:
             self._execute(step)
             return "passed", None
         except (PlaywrightTimeoutError, PlaywrightError) as e:
-            return "locator_failed", self._capture(step, f"{type(e).__name__}: {e}")
+            message = str(e).lower()
+            non_locator = step.action == "goto" or any(
+                marker in message for marker in ("has been closed", "target closed", "crash", "net::err_")
+            )
+            status = "execution_failed" if non_locator else ("assert_failed" if step.action == "assert" else "locator_failed")
+            return status, self._capture(step, f"{type(e).__name__}: {e}")
         except AssertionError as e:
             return "assert_failed", self._capture(step, f"AssertionError: {e}")
 
@@ -79,7 +84,9 @@ class Runner:
     def _try_element_html(self, step: Step) -> str | None:
         if step.selector:
             try:
-                return self.page.locator(step.selector).first.evaluate("el => el.outerHTML")
+                loc = self.page.locator(step.selector)
+                if loc.count():
+                    return loc.first.evaluate("el => el.outerHTML", timeout=500)
             except Exception:
                 pass
         # 定位失败兜底：按 action 抓同类型元素的 HTML，而非整页 body，
